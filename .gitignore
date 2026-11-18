@@ -1,0 +1,4 @@
+# Build outputs: main.ts writes these, they are never committed.
+out/
+out2/
+node_modules/
