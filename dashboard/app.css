@@ -134,3 +134,7 @@ tbody tr[data-selected="true"] { background: var(--accent-soft); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }
+
+/* Revision: the CSV export button and the drawer's rank-context line. */
+.button.export { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.rank-context { border-left: 3px solid var(--accent); padding-left: var(--s2); }

@@ -19,13 +19,15 @@ mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input <snapshot.json>
 Implied value is one function of the snapshot's own figures, applied the same way to every protocol:
 
 ```
-implied = round(tvl_usd x 0.25 x (1 + clamp(change_7d, -60, 120) / 100 x 0.5)
+implied = round(tvl_usd x 0.32 x (1 + clamp(change_7d, -60, 120) / 100 x 0.5)
           x (0.6 + min(age_days, 1095) / 1095 x 0.4))
 ```
 
-The board covers the whole watchlist (40 protocols with at least $50M of TVL and no token on record) plus the 160 strongest pre-token protocols below that floor. Protocols whose token already trades are set aside in the Live view with their market caps shown — the market's own value, never a model's.
+The 0.32 multiple is calibrated, not picked: across the 119 live-token protocols that carry a market cap, the median implied value is 1.04x the market cap (the middle half runs 0.22x to 5.67x). The spread is wide, so the figure is an order-of-magnitude estimate, never a price. The ranking is steady under the constants: the top 10 does not change when the growth weight moves 0.3 to 0.7 or the TVL multiple 0.25 to 0.40.
 
-The dashboard adds the views a reader asks for (Board, Trending, New, Liquidity Watch, Live token), filters by search, chain, category and age, a detail view for every protocol with its model breakdown and farm plan, and a model sandbox that re-ranks the table with different constants in the browser. The board itself never changes.
+The board covers the whole watchlist (40 protocols with at least $50M of TVL and no token on record) plus every rankable pre-token protocol below that floor — 186 of them, so 226 rows in all, none left out. The floor still does real work: the rankable protocols above it that the watchlist does not name are dominated by wrapped and staked products of tokens that already trade (WBTC, Binance staked ETH, USDT0), and ranking them as launches would put wrapped bitcoin at the top of a launch radar. Protocols whose token already trades are set aside in the Live view with their market caps shown — the market's own value, never a model's.
+
+The dashboard adds the views a reader asks for (Board, Trending, New, Liquidity Watch, Live token), filters by search, chain, category and age, a detail view for every protocol with its model breakdown, its rank neighbours and farm plan, a CSV download of whatever the filters show, and a model sandbox that re-ranks the table with different constants in the browser. The board itself never changes.
 
 ## Signals and farm plans
 

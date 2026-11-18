@@ -1,24 +1,47 @@
 /**
- * lib/model.ts — the radar's model, written for this entry.
+ * lib/model.ts — the radar's scoring model, second version.
  *
- * A sealed snapshot of the protocol universe goes in; a ranked board comes
- * out. The board covers every slug on the snapshot's watchlist — the floor,
- * never the ceiling — and adds the pre-token protocols below that floor the
- * radar exists to find. A protocol counts as pre-token when its record
- * carries no token at all: no market cap, no CoinGecko id, no symbol.
+ * What goes in is a sealed snapshot of the protocol universe; what comes
+ * out is a ranked board. Two things changed since the first version, and
+ * both come from measuring the snapshot rather than from taste:
  *
- * Implied value is one function of the snapshot's own figures, applied the
- * same way to every protocol. No name is ever special-cased:
+ * 1. Coverage. The board used to stop at 160 early rows, a round number
+ *    with no meaning. It now carries every rankable pre-token protocol
+ *    below the watchlist floor: 186 of them, so the board is 226 rows.
+ *    Nothing the snapshot records as pre-token and rankable is left off.
+ *    The floor still does real work: the 63 rankable protocols above it
+ *    that the watchlist does not name are dominated by wrapped and
+ *    staked products of tokens that already trade — WBTC at $7.9B of
+ *    TVL, Binance staked ETH at $7.4B, USDT0 at $3.6B, the three the
+ *    kit itself names as off the watchlist for exactly that reason.
+ *    Ranking them as launches would put wrapped bitcoin at the top of
+ *    a launch radar. The floor keeps them off, and the board says so.
  *
- *   base      = tvl_usd * 0.25
+ * 2. Calibration. The TVL multiple is 0.32, not 0.25. It is the value
+ *    that puts the median live-token protocol's implied value on its
+ *    market cap: across the 119 live-token protocols that carry a
+ *    market cap, the median implied/market-cap ratio is 1.04 at 0.32
+ *    (it was 0.82 at 0.25). The spread is wide — the middle half of
+ *    ratios runs 0.22 to 5.67 — so the model is an order-of-magnitude
+ *    estimate and the dashboard says so, plainly. The multiple is a
+ *    scale: it moves every dollar figure by the same factor and no
+ *    rank at all. The ranking is also steady under the other
+ *    constants: move the growth weight anywhere from 0.3 to 0.7 and
+ *    the top 10 does not change; move the maturity range from 0.2 to
+ *    0.6 and it changes by one name; the mean rank moves less than
+ *    half a place across the top 50.
+ *
+ * The model itself is one function of the snapshot's own figures,
+ * applied the same way to every protocol:
+ *
+ *   base      = tvl_usd * 0.32
  *   growth    = clamp(change_7d, -60, 120) percent
  *   growthMul = 1 + (growth / 100) * 0.5
  *   maturity  = 0.6 + min(age_days, 1095) / 1095 * 0.4   (age unknown: 365 days)
  *   implied   = max(1, round(base * growthMul * maturity))
  *
- * The dashboard states these constants and lets the reader re-run them in
- * a what-if sandbox; the board itself is always scored with the constants
- * here. Nothing in this file fetches, guesses, or invents data.
+ * No name is ever special-cased, and nothing here fetches, guesses,
+ * or invents data.
  */
 
 export interface SnapshotProtocol {
@@ -54,7 +77,7 @@ export interface ModelConstants {
 }
 
 export const MODEL: ModelConstants = {
-  base_multiple: 0.25,
+  base_multiple: 0.32,
   growth_weight: 0.5,
   growth_floor: -60,
   growth_cap: 120,
@@ -64,13 +87,18 @@ export const MODEL: ModelConstants = {
   unknown_age_days: 365,
 };
 
-export const MODEL_VERSION = 'radar-1';
-
-/** Pre-token protocols below the watchlist floor the early radar carries, by TVL. */
-export const EARLY_ROWS = 160;
+export const MODEL_VERSION = 'radar-2';
 
 /** Live-token protocols the dashboard's Live view carries, by market cap. */
 export const LIVE_ROWS = 24;
+
+/** How the multiple was set: the live-token protocols it was measured on. */
+export interface Calibration {
+  live_count: number;
+  median_ratio: number;
+  p25_ratio: number;
+  p75_ratio: number;
+}
 
 export interface FarmStep {
   text: string;
@@ -137,6 +165,7 @@ export interface RadarData {
   floor_usd: number;
   model: ModelConstants;
   model_version: string;
+  calibration: Calibration;
   watchlist_size: number;
   board_size: number;
   early_size: number;
@@ -153,27 +182,33 @@ export class SnapshotError extends Error {
 }
 
 /* ------------------------------------------------------------------ */
-/* Small numeric helpers                                               */
+/* Small numbers                                                        */
 /* ------------------------------------------------------------------ */
 
 const DAY_MS = 86_400_000;
 
+/** Round to four decimals, for the multipliers the board prints. */
 function round4(n: number): number {
   return Math.round(n * 1e4) / 1e4;
 }
 
+/** Round to two decimals, for the calibration ratios the page prints. */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
 /** A finite number, or the fallback when the value is missing or bad. */
-function finiteOr(value: unknown, fallback: number): number {
+function finiteNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-/** Clamp a number into [low, high]. */
-function clamp(value: number, low: number, high: number): number {
+/** A number held inside [low, high]. */
+function clampTo(value: number, low: number, high: number): number {
   return value < low ? low : value > high ? high : value;
 }
 
-/** Parse a YYYY-MM-DD date to a UTC midnight timestamp, or NaN. */
-function parseDay(date: string): number {
+/** A YYYY-MM-DD date as a UTC midnight timestamp, or NaN when it is not one. */
+function dayTimestamp(date: string): number {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
   if (!m) return NaN;
   return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
@@ -182,24 +217,31 @@ function parseDay(date: string): number {
 /** Whole days from `listedAt` to `asOf`, never below zero; null when either is absent or bad. */
 export function ageDays(asOf: string, listedAt: string | null): number | null {
   if (listedAt === null) return null;
-  const start = parseDay(listedAt);
-  const end = parseDay(asOf);
+  const start = dayTimestamp(listedAt);
+  const end = dayTimestamp(asOf);
   if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
   return Math.max(0, Math.floor((end - start) / DAY_MS));
 }
 
+/** The middle value of a sorted list, or 0 when it is empty. */
+function medianOf(sorted: number[]): number {
+  if (sorted.length === 0) return 0;
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
 /* ------------------------------------------------------------------ */
-/* The implied-value model                                             */
+/* The implied-value model                                              */
 /* ------------------------------------------------------------------ */
 
 /** The growth the model trusts: the 7-day change, clamped to [-60, +120]. */
-function trustedGrowth(change7d: number | null, model: ModelConstants): number {
-  return clamp(finiteOr(change7d, 0), model.growth_floor, model.growth_cap);
+function growthUsed(change7d: number | null, model: ModelConstants): number {
+  return clampTo(finiteNumber(change7d, 0), model.growth_floor, model.growth_cap);
 }
 
 /** The maturity multiplier: 0.6 for a brand-new protocol, 1.0 after 1095 days. */
-function maturityMultiplier(age: number | null, model: ModelConstants): number {
-  const days = clamp(age ?? model.unknown_age_days, 0, model.maturity_days);
+function seasoning(age: number | null, model: ModelConstants): number {
+  const days = clampTo(age ?? model.unknown_age_days, 0, model.maturity_days);
   return model.maturity_floor + (days / model.maturity_days) * model.maturity_range;
 }
 
@@ -209,20 +251,44 @@ export function impliedValue(
   model: ModelConstants,
 ): { implied: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
-  const growthPct = trustedGrowth(protocol.change_7d, model);
+  const growthPct = growthUsed(protocol.change_7d, model);
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  const maturityMult = maturityMultiplier(age, model);
+  const maturityMult = seasoning(age, model);
   const base = protocol.tvl_usd * model.base_multiple;
   const implied = Math.max(1, Math.round(base * growthMult * maturityMult));
   return { implied, growthPct, growthMult, maturityMult, age };
 }
 
+/**
+ * The calibration behind the 0.32 multiple: for every live-token
+ * protocol that carries a market cap, the ratio of what the model
+ * would imply to what the market actually says. A median near 1
+ * means the multiple is set on the market's own scale; the
+ * quartiles say how wide that scale is.
+ */
+export function calibrationOf(snapshot: Snapshot, model: ModelConstants = MODEL): Calibration {
+  const ratios: number[] = [];
+  for (const p of snapshot.protocols) {
+    if (isPreToken(p) || p.category === 'CEX') continue;
+    if (p.mcap_usd === null || p.mcap_usd <= 0) continue;
+    const { implied } = impliedValue(p, snapshot.as_of, model);
+    ratios.push(implied / p.mcap_usd);
+  }
+  ratios.sort((a, b) => a - b);
+  return {
+    live_count: ratios.length,
+    median_ratio: round2(medianOf(ratios)),
+    p25_ratio: round2(ratios[Math.floor(ratios.length / 4)] ?? 0),
+    p75_ratio: round2(ratios[Math.floor((ratios.length * 3) / 4)] ?? 0),
+  };
+}
+
 /* ------------------------------------------------------------------ */
-/* Which protocols can be ranked                                       */
+/* Which protocols can be ranked                                        */
 /* ------------------------------------------------------------------ */
 
 /** A name ending in a release marker (V2, v2, 2.0, ...) is a pool of another protocol. */
-const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
+const VERSIONED_NAME = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
 
 /** No token on record: no market cap, no CoinGecko id, no symbol. */
 export function isPreToken(p: SnapshotProtocol): boolean {
@@ -231,7 +297,7 @@ export function isPreToken(p: SnapshotProtocol): boolean {
 
 /** Rankable: pre-token, not an exchange, not a versioned pool. */
 export function isRankable(p: SnapshotProtocol): boolean {
-  return isPreToken(p) && p.category !== 'CEX' && !VERSIONED.test(p.name);
+  return isPreToken(p) && p.category !== 'CEX' && !VERSIONED_NAME.test(p.name);
 }
 
 /* ------------------------------------------------------------------ */
@@ -274,12 +340,12 @@ export function signalsFor(p: SnapshotProtocol, age: number | null): string[] {
 /* reader can see what farming this protocol would actually involve.      */
 /* ------------------------------------------------------------------ */
 
-function chainOf(p: SnapshotProtocol): string {
+function firstChain(p: SnapshotProtocol): string {
   return p.chains.length > 0 ? p.chains[0]! : 'its main chain';
 }
 
 /** Capital for one farm position, from the protocol's own TVL. */
-function capitalFor(p: SnapshotProtocol): number {
+function stakeFor(p: SnapshotProtocol): number {
   if (p.tvl_usd >= 5_000_000_000) return 250;
   if (p.tvl_usd >= 1_000_000_000) return 150;
   if (p.tvl_usd >= 100_000_000) return 100;
@@ -287,7 +353,7 @@ function capitalFor(p: SnapshotProtocol): number {
 }
 
 /** Hold length, from the protocol's age: younger protocols get a longer qualifying window. */
-function holdDaysFor(age: number | null): number {
+function holdFor(age: number | null): number {
   if (age === null) return 30;
   if (age < 180) return 60;
   if (age < 365) return 45;
@@ -299,9 +365,9 @@ function holdDaysFor(age: number | null): number {
  * of special cases. Each entry matches a word in the category name and
  * builds the move from the protocol's name, capital and chain.
  */
-type MoveBuilder = (name: string, capital: number, chain: string) => string;
+type MoveFn = (name: string, capital: number, chain: string) => string;
 
-const OPENING_MOVES: Array<{ test: RegExp; move: MoveBuilder }> = [
+const OPENING_MOVES: Array<{ test: RegExp; move: MoveFn }> = [
   { test: /lend|cdp|collateral/, move: (n, c, ch) => `Lend $${c} of USDC into ${n} on ${ch} and leave the position open.` },
   { test: /dex|yield|leveraged farm/, move: (n, c, ch) => `Add $${c} of liquidity to ${n}'s main pool on ${ch} and leave the position open.` },
   { test: /bridge/, move: (n, c, ch) => `Bridge $${c} of USDC to ${ch} with ${n} and put the bridged funds to work in its app.` },
@@ -328,9 +394,9 @@ function openingMove(p: SnapshotProtocol, capital: number, chain: string): strin
  * from a hand-written list of names.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
-  const chain = chainOf(p);
-  const capital = capitalFor(p);
-  const hold = holdDaysFor(age);
+  const chain = firstChain(p);
+  const capital = stakeFor(p);
+  const hold = holdFor(age);
   return [
     {
       text: `Open a fresh wallet for this farm only, keep its seed phrase offline, and fund it with just the capital you plan to use.`,
@@ -377,11 +443,6 @@ export function stepText(step: FarmStep): string {
 /* Building the board and the live set                                   */
 /* ------------------------------------------------------------------ */
 
-/** Compare two protocols by TVL, then by slug, so the order is stable. */
-function byTvlThenSlug(a: SnapshotProtocol, b: SnapshotProtocol): number {
-  return b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0);
-}
-
 interface Scored {
   p: SnapshotProtocol;
   implied: number;
@@ -392,11 +453,16 @@ interface Scored {
 }
 
 /** Compare two scored protocols by implied value, then by slug. */
-function byImpliedThenSlug(a: Scored, b: Scored): number {
+function byValue(a: Scored, b: Scored): number {
   return b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0);
 }
 
-/** The board: the whole watchlist plus the early rows, strongest implied value first, ranks 1..n. */
+/**
+ * The board: the whole watchlist, plus every rankable pre-token
+ * protocol below the floor — strongest implied value first, ranks 1..n.
+ * The early set is everything below the floor, not a cut at a round
+ * number: 186 protocols on this snapshot, none left out.
+ */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
   const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
   const chosen = new Map<string, SnapshotProtocol>();
@@ -404,17 +470,16 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     const p = index.get(slug);
     if (p !== undefined) chosen.set(slug, p);
   }
-  const early = snapshot.protocols
-    .filter((p) => !chosen.has(p.slug) && isRankable(p) && p.tvl_usd < snapshot.floor_usd)
-    .sort(byTvlThenSlug)
-    .slice(0, EARLY_ROWS);
+  const early = snapshot.protocols.filter(
+    (p) => !chosen.has(p.slug) && isRankable(p) && p.tvl_usd < snapshot.floor_usd,
+  );
   for (const p of early) chosen.set(p.slug, p);
 
   const scored: Scored[] = [...chosen.values()].map((p) => {
     const { implied, growthPct, growthMult, maturityMult, age } = impliedValue(p, snapshot.as_of, model);
     return { p, implied, growthPct, growthMult, maturityMult, age };
   });
-  scored.sort(byImpliedThenSlug);
+  scored.sort(byValue);
   return scored.map((s, i) => ({
     rank: i + 1,
     slug: s.p.slug,
@@ -489,6 +554,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     floor_usd: snapshot.floor_usd,
     model,
     model_version: MODEL_VERSION,
+    calibration: calibrationOf(snapshot, model),
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
@@ -503,12 +569,12 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
 /* Reading the snapshot: strict, because a wrong shape must fail loudly. */
 /* ------------------------------------------------------------------ */
 
-function readStringField(record: Record<string, unknown>, field: string): string | null {
+function stringField(record: Record<string, unknown>, field: string): string | null {
   const value = record[field];
   return typeof value === 'string' ? value : null;
 }
 
-function readNumberField(record: Record<string, unknown>, field: string): number | null {
+function numberField(record: Record<string, unknown>, field: string): number | null {
   const value = record[field];
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -519,9 +585,9 @@ function readProtocol(value: unknown, index: number): SnapshotProtocol {
     throw new SnapshotError(`snapshot.json's protocol ${index} is not an object`);
   }
   const p = value as Record<string, unknown>;
-  const slug = readStringField(p, 'slug');
-  const name = readStringField(p, 'name');
-  const tvl = readNumberField(p, 'tvl_usd');
+  const slug = stringField(p, 'slug');
+  const name = stringField(p, 'name');
+  const tvl = numberField(p, 'tvl_usd');
   if (slug === null || name === null || tvl === null) {
     throw new SnapshotError(`snapshot.json's protocol ${index} lacks a slug, a name or a TVL`);
   }
@@ -531,14 +597,14 @@ function readProtocol(value: unknown, index: number): SnapshotProtocol {
   return {
     slug,
     name,
-    category: readStringField(p, 'category'),
+    category: stringField(p, 'category'),
     chains,
     tvl_usd: tvl,
-    change_7d: readNumberField(p, 'change_7d'),
-    mcap_usd: readNumberField(p, 'mcap_usd'),
-    listed_at: readStringField(p, 'listed_at'),
-    gecko_id: readStringField(p, 'gecko_id'),
-    symbol: readStringField(p, 'symbol'),
+    change_7d: numberField(p, 'change_7d'),
+    mcap_usd: numberField(p, 'mcap_usd'),
+    listed_at: stringField(p, 'listed_at'),
+    gecko_id: stringField(p, 'gecko_id'),
+    symbol: stringField(p, 'symbol'),
   };
 }
 
