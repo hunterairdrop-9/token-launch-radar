@@ -42,6 +42,14 @@
  *
  * No name is ever special-cased, and nothing here fetches, guesses,
  * or invents data.
+ *
+ * Revision notes (radar-2, second revision): the model is unchanged.
+ * What changed is what the dashboard shows of it: each row now carries
+ * its clamped growth_pct (the growth the model scores), and the
+ * calibration ships as points (calibrationPoints) so the page can draw
+ * the implied-vs-market-cap scatter. A per-category multiple was tested
+ * leave-one-out and rejected: it widens the log error (1.06 vs 0.99 in
+ * log10) and its small-category multiples run 0.004x to 662x.
  */
 
 export interface SnapshotProtocol {
@@ -132,6 +140,12 @@ export interface BoardRow {
   signals: string[];
 }
 
+export interface CalibrationPoint {
+  slug: string;
+  implied_value_usd: number;
+  mcap_usd: number;
+}
+
 export interface RadarRow {
   rank: number;
   slug: string;
@@ -144,6 +158,8 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
+  /** The 7-day growth the model scores: change_7d clamped to [-60, +120]. */
+  growth_pct: number;
   growth_multiplier: number;
   maturity_multiplier: number;
   signals: string[];
@@ -166,6 +182,11 @@ export interface RadarData {
   model: ModelConstants;
   model_version: string;
   calibration: Calibration;
+  /** One point per live-token protocol the calibration is measured on: what
+   *  the model would imply against the market cap it actually carries. The
+   *  dashboard draws these as its calibration scatter; the board never
+   *  ranks on them. */
+  calibration_points: CalibrationPoint[];
   watchlist_size: number;
   board_size: number;
   early_size: number;
@@ -281,6 +302,25 @@ export function calibrationOf(snapshot: Snapshot, model: ModelConstants = MODEL)
     p25_ratio: round2(ratios[Math.floor(ratios.length / 4)] ?? 0),
     p75_ratio: round2(ratios[Math.floor((ratios.length * 3) / 4)] ?? 0),
   };
+}
+
+/**
+ * The same live-token set as the calibration, as points: what the model
+ * would imply for each protocol against the market cap it actually
+ * carries. Sorted by market cap, largest first, so the order is stable.
+ * The dashboard draws these as its calibration scatter — the visual
+ * proof of the median and the quartiles calibrationOf reports.
+ */
+export function calibrationPoints(snapshot: Snapshot, model: ModelConstants = MODEL): CalibrationPoint[] {
+  const points: CalibrationPoint[] = [];
+  for (const p of snapshot.protocols) {
+    if (isPreToken(p) || p.category === 'CEX') continue;
+    if (p.mcap_usd === null || p.mcap_usd <= 0) continue;
+    const { implied } = impliedValue(p, snapshot.as_of, model);
+    points.push({ slug: p.slug, implied_value_usd: implied, mcap_usd: p.mcap_usd });
+  }
+  points.sort((a, b) => b.mcap_usd - a.mcap_usd || (a.slug < b.slug ? -1 : 1));
+  return points;
 }
 
 /* ------------------------------------------------------------------ */
@@ -537,6 +577,7 @@ export function radarRow(row: BoardRow): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
+    growth_pct: row.model.growth_pct,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     signals: row.signals,
@@ -555,6 +596,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     model,
     model_version: MODEL_VERSION,
     calibration: calibrationOf(snapshot, model),
+    calibration_points: calibrationPoints(snapshot, model),
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,

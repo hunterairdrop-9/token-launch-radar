@@ -29,6 +29,10 @@ The board covers the whole watchlist (40 protocols with at least $50M of TVL and
 
 The dashboard adds the views a reader asks for (Board, Trending, New, Liquidity Watch, Live token), filters by search, chain, category and age, a detail view for every protocol with its model breakdown, its rank neighbours and farm plan, a CSV download of whatever the filters show, and a model sandbox that re-ranks the table with different constants in the browser. The board itself never changes.
 
+## What the numbers on screen mean
+
+The 7-day growth shown anywhere on the page is the growth the model scores — the reported change clamped to [−60%, +120%]. When the clamp bites (4 rows on this snapshot, Shift DeFi's reported +4448.47% among them), the detail drawer shows the clamped value and the raw figure beside it, labelled, so the page and the model never appear to disagree. The model section draws the calibration as a scatter: one dot per live-token protocol, implied value against market cap on log scales, with the 1:1 diagonal and the middle-half band. A per-category multiple was tested leave-one-out and rejected — it widens the log error (1.06 vs 0.99 for the single multiple) and its small-category values run 0.004× to 662×, so the board keeps one multiple for all.
+
 ## Signals and farm plans
 
 Every row carries four signals, computed from its own figures and shown as chips in the table:

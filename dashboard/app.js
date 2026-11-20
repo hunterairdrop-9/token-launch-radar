@@ -51,6 +51,21 @@
     return (n > 0 ? '+' : '') + n.toFixed(2) + '%';
   }
 
+  /** The growth the model scores: the 7-day change, clamped to the model's floor and cap. */
+  function growthShown(row) {
+    if (typeof row.growth_pct === 'number' && isFinite(row.growth_pct)) return row.growth_pct;
+    if (row.change_7d === null || row.change_7d === undefined) return null;
+    return Math.min(DATA.model.growth_cap, Math.max(DATA.model.growth_floor, row.change_7d));
+  }
+
+  /** Whether the raw 7-day change was capped by the model, and in which direction. */
+  function growthCapped(row) {
+    if (row.change_7d === null || row.change_7d === undefined) return null;
+    if (row.change_7d > DATA.model.growth_cap) return 'cap';
+    if (row.change_7d < DATA.model.growth_floor) return 'floor';
+    return null;
+  }
+
   /** An age in days as 45d, 1.5y, or unknown. */
   function ageStr(days) {
     if (days === null || days === undefined) return 'unknown';
@@ -358,7 +373,7 @@
   function ledeHtml() {
     var floorM = Math.round(DATA.floor_usd / 1e6);
     return '<section class="lede"><div>' +
-      '<h1>' + DATA.watchlist_size + ' watchlist protocols, ranked by implied value</h1>' +
+      '<h1>' + DATA.board_size + ' pre-token protocols ranked by implied value · calibrated 0.32× TVL</h1>' +
       '<p>The watchlist is the floor: every protocol with at least $' + floorM + 'M of TVL and no token on record. ' +
       'The early radar adds ' + DATA.early_size + ' pre-token protocols below that floor — every rankable one, none left out. ' +
       'Implied value is a model, not a promise — and never a price.</p>' +
@@ -377,7 +392,7 @@
         '<span class="rank">Rank ' + r.rank + '</span>' +
         '<b>' + h(r.name) + '</b>' +
         '<span class="imp">' + usd(r.implied_value_usd) + '</span>' +
-        '<span class="sub">TVL ' + usd(r.tvl_usd) + ' · 7d ' + pctStr(r.change_7d) + '</span>' +
+        '<span class="sub">TVL ' + usd(r.tvl_usd) + ' · 7d ' + pctStr(growthShown(r)) + '</span>' +
         '</button>';
     }).join('');
     return '<section class="spot"><h2>Top 10 by implied value</h2><div class="cards">' + cards + '</div></section>';
@@ -464,8 +479,13 @@
     var viewRank = {};
     if (state.sandbox) list.forEach(function (r, i) { viewRank[r.slug] = i + 1; });
     var rows = list.map(function (r) {
-      var growth = r.change_7d === null ? 'n/a' : pctStr(r.change_7d);
-      var growthClass = r.change_7d === null ? '' : r.change_7d >= 0 ? 'pos' : 'neg';
+      // The 7d column shows the growth the model scores — the clamped
+      // value — never the raw reported change, so the table and the model
+      // cannot appear to disagree. The raw figure is labelled in the
+      // detail drawer when the clamp bites.
+      var shown = growthShown(r);
+      var growth = shown === null ? 'n/a' : pctStr(shown);
+      var growthClass = shown === null ? '' : shown >= 0 ? 'pos' : 'neg';
       var shownRank = state.sandbox ? viewRank[r.slug] : r.rank;
       var width = Math.max(3, Math.round((valueNow(r) / max) * 100));
       return '<tr data-action="row" data-slug="' + h(r.slug) + '" data-selected="' +
@@ -550,6 +570,59 @@
       '</section>';
   }
 
+  /* ---------------------------------------------------------------- */
+  /* The calibration chart: implied value against market cap, log-log    */
+  /* ---------------------------------------------------------------- */
+
+  // One dot per live-token protocol: what the model would imply against
+  // the market cap it actually carries. The diagonal is a 1:1 match; the
+  // dashed lines hold the middle half of the ratios. Both axes are log
+  // scale, so a ratio is a fixed vertical gap anywhere on the chart.
+  function calibrationChartHtml() {
+    var points = DATA.calibration_points || [];
+    var cal = DATA.calibration || { live_count: 0, median_ratio: 0, p25_ratio: 0, p75_ratio: 0 };
+    if (points.length === 0) return '';
+    var W = 640, H = 360, L = 58, R = 36, T = 14, B = 42;
+    var xs = points.map(function (p) { return Math.log10(p.mcap_usd); });
+    var ys = points.map(function (p) { return Math.log10(p.implied_value_usd); });
+    var x0 = Math.floor(Math.min.apply(null, xs.concat(ys)) - 0.4);
+    var x1 = Math.ceil(Math.max.apply(null, xs.concat(ys)) + 0.4);
+    var y0 = x0, y1 = x1;
+    function X(v) { return L + (v - x0) / (x1 - x0) * (W - L - R); }
+    function Y(v) { return T + (y1 - v) / (y1 - y0) * (H - T - B); }
+    function money(pow) {
+      if (pow >= 9) return '$' + (Math.pow(10, pow - 9)) + 'B';
+      if (pow >= 6) return '$' + (Math.pow(10, pow - 6)) + 'M';
+      return '$' + (Math.pow(10, pow - 3)) + 'K';
+    }
+    var grid = '';
+    for (var p = x0; p <= x1; p++) {
+      grid += '<line x1="' + X(p).toFixed(1) + '" y1="' + Y(y1).toFixed(1) + '" x2="' + X(p).toFixed(1) + '" y2="' + Y(y0).toFixed(1) + '" class="grid"/>' +
+        '<text x="' + X(p).toFixed(1) + '" y="' + (H - 24).toFixed(1) + '" class="axis">' + money(p) + '</text>';
+      grid += '<line x1="' + X(x0).toFixed(1) + '" y1="' + Y(p).toFixed(1) + '" x2="' + X(x1).toFixed(1) + '" y2="' + Y(p).toFixed(1) + '" class="grid"/>' +
+        '<text x="' + (L - 8).toFixed(1) + '" y="' + (Y(p) + 4).toFixed(1) + '" class="axis" text-anchor="end">' + money(p) + '</text>';
+    }
+    // The diagonal and the middle-half band, in log space parallel lines.
+    var diag = '<line x1="' + X(x0).toFixed(1) + '" y1="' + Y(x0).toFixed(1) + '" x2="' + X(x1).toFixed(1) + '" y2="' + Y(x1).toFixed(1) + '" class="diag"/>';
+    var band = '';
+    [['p25', cal.p25_ratio], ['p75', cal.p75_ratio]].forEach(function (pair) {
+      var off = Math.log10(pair[1] || 1);
+      band += '<line x1="' + X(x0).toFixed(1) + '" y1="' + Y(x0 + off).toFixed(1) + '" x2="' + X(x1).toFixed(1) + '" y2="' + Y(x1 + off).toFixed(1) + '" class="band"/>';
+    });
+    var dots = points.map(function (pt) {
+      return '<circle cx="' + X(Math.log10(pt.mcap_usd)).toFixed(1) + '" cy="' + Y(Math.log10(pt.implied_value_usd)).toFixed(1) + '" r="3" class="dot"/>';
+    }).join('');
+    return '<figure class="calib">' +
+      '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Calibration scatter: implied value against market cap for ' + points.length + ' live-token protocols">' +
+      grid + band + diag + dots +
+      '<text x="' + ((L + W - R) / 2).toFixed(1) + '" y="' + (H - 6).toFixed(1) + '" class="axis" text-anchor="middle">Market cap (log scale)</text>' +
+      '<text x="14" y="' + ((T + H - B) / 2).toFixed(1) + '" class="axis" text-anchor="middle" transform="rotate(-90 14 ' + ((T + H - B) / 2).toFixed(1) + ')">Implied value (log scale)</text>' +
+      '</svg>' +
+      '<figcaption>Each dot is one of the ' + points.length + ' live-token protocols: what the model would imply against the market cap it actually carries. ' +
+      'The solid line is a 1:1 match; the dashed lines hold the middle half (' + cal.p25_ratio + '× to ' + cal.p75_ratio + '×); the median is ' + cal.median_ratio + '×. ' +
+      'The spread is wide, so read the board as an order of magnitude, never a price.</figcaption></figure>';
+  }
+
   function modelHtml() {
     var m = DATA.model;
     var cal = DATA.calibration || { live_count: 0, median_ratio: 0, p25_ratio: 0, p75_ratio: 0 };
@@ -562,6 +635,8 @@
       ' live-token protocols that carry a market cap, the median implied value is ' + cal.median_ratio +
       'x the market cap (the middle half runs ' + cal.p25_ratio + 'x to ' + cal.p75_ratio +
       'x). The spread is wide, so treat the figure as an order of magnitude, never a price. The ranking is steady too: the top 10 does not change when the growth weight moves 0.3 to 0.7 or the TVL multiple 0.25 to 0.40.</p>' +
+      calibrationChartHtml() +
+      '<p class="sub">One multiple for every protocol, by choice: per-category multiples were tested leave-one-out and rejected — they widen the log error (1.06 vs 0.99 for the single multiple) and their small-category values run 0.004× to 662×, so the board keeps one multiple for all.</p>' +
       '<p class="note">Data: ' + h(DATA.source) + '. Snapshot date ' + h(DATA.as_of) + '; the snapshot is sealed and never updates. A protocol is shown as recording no token, never as having none: its record may simply not carry one. Wrapped and staked products of tokens that already trade sit above the watchlist floor and are not ranked as launches.</p>' +
       '</section>';
   }
@@ -601,10 +676,29 @@
     var steps = farmPlan(row);
     var official = recompute(row, DATA.model);
     var officialOk = official === row.implied_value_usd;
-    var chains = row.chains && row.chains.length ? row.chains.join(', ') : 'an unnamed chain';
+    // The drawer is 560px wide: a protocol on a dozen chains would wrap
+    // its header to three lines, so the list is capped at four chains.
+    var chainList = row.chains && row.chains.length ? row.chains : [];
+    var chains = chainList.length > 4
+      ? chainList.slice(0, 4).join(', ') + ' +' + (chainList.length - 4) + ' more'
+      : (chainList.join(', ') || 'an unnamed chain');
     var sandboxLine = '';
     if (state.sandbox) {
       sandboxLine = '<div><span>Sandbox implied value</span><b class="num">' + usd(recompute(row, modelNow())) + '</b></div>';
+    }
+    // The growth the model scores is the clamped one; when the raw 7-day
+    // change sits outside the clamp, show it too, labelled, so the drawer
+    // and the model never appear to disagree.
+    var shownGrowth = growthShown(row);
+    var capped = growthCapped(row);
+    var rawGrowthLine = '';
+    var capNote = '';
+    if (capped === 'cap') {
+      rawGrowthLine = '<div><span>Raw seven-day growth</span><b class="num">' + pctStr(row.change_7d) + '</b></div>';
+      capNote = ' Raw 7d ' + pctStr(row.change_7d) + ' — capped at +' + DATA.model.growth_cap + '% for scoring.';
+    } else if (capped === 'floor') {
+      rawGrowthLine = '<div><span>Raw seven-day growth</span><b class="num">' + pctStr(row.change_7d) + '</b></div>';
+      capNote = ' Raw 7d ' + pctStr(row.change_7d) + ' — floored at ' + DATA.model.growth_floor + '% for scoring.';
     }
     var stepsHtml = steps.map(function (s) {
       var at = s.indexOf(' Cost: ');
@@ -623,17 +717,18 @@
       '<section class="detail-section"><h3>Implied value</h3>' +
       '<div class="equation">' +
       '<div><span>TVL</span><b class="num">' + usd(row.tvl_usd) + '</b></div>' +
-      '<div><span>Seven-day growth</span><b class="num">' + pctStr(row.change_7d) + '</b></div>' +
+      '<div><span>Seven-day growth</span><b class="num">' + pctStr(shownGrowth) + '</b></div>' +
+      rawGrowthLine +
       '<div><span>Age with no token</span><b class="num">' + ageStr(row.age_days) + '</b></div>' +
       '<div><span>First listed</span><b class="num">' + h(row.listed_at || 'unknown') + '</b></div>' +
       '<div><span>Growth multiplier</span><b class="num">' + row.growth_multiplier + '</b></div>' +
       '<div><span>Maturity multiplier</span><b class="num">' + row.maturity_multiplier + '</b></div>' +
-      '<div><span>Implied value</span><b class="num">' + usd(row.implied_value_usd) + '</b></div>' +
+      '<div class="wide"><span>Implied value</span><b class="num">' + usd(row.implied_value_usd) + '</b></div>' +
       sandboxLine +
       '</div>' +
-      '<p class="sub">Model ' + h(DATA.model_version) + ': the same function scores every protocol. The page recomputes this row as ' + usd(official) +
+      '<p class="sub">Model ' + h(DATA.model_version) + ' scores every protocol the same way. Recomputed here as ' + usd(official) +
       (officialOk ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') +
-      ' This is an estimate, not a price.</p></section>' +
+      ' An estimate, not a price.' + h(capNote) + '</p></section>' +
       '<section class="detail-section"><h3>Farm plan</h3><ol class="steps">' + stepsHtml + '</ol></section>';
     if (typeof dialog.showModal === 'function') {
       if (!dialog.open) dialog.showModal();
